@@ -1,0 +1,26 @@
+﻿CategoryGroup,Code,Description
+Hard Coral,HCB,Hard Coral – Bleached
+Hard Coral,HCBR,Hard Coral – Branching
+Hard Coral,HCE,Hard Coral – Encrusting
+Hard Coral,HCF,Hard Coral – Foliose
+Hard Coral,HCM,Hard Coral – Massive
+Hard Coral,HCP,Hard Coral – Plate
+Hard Coral,HC,All other hard coral growth forms
+Soft Coral,SCB,Soft Coral – Bleached
+Soft Coral,SCL,Soft Coral – Leathery
+Soft Coral,SCZ,Soft Coral – Zoanthids
+Soft Coral,SC,All other soft coral growth forms
+Recently Killed Coral,RKC,"Recently Killed Coral (white skeleton, algae < 1 cm)"
+Recently Killed Coral,RKCNIA,Recently Killed Coral with Nutrient Indicator Algae
+Recently Killed Coral,RKCTA,Recently Killed Coral with Turf Algae
+Rock,RC,Bare consolidated substrate
+Rock,RCCA,Rock with Coralline Algae
+Rock,RCTA,Rock with Turf Algae
+Sponge,SP,All other sponge growth forms combined
+Sponge,SPE,Sponge – Encrusting
+Algae,NIA,Nutrient Indicator Algae
+Algae,MA,Macroalgae
+Other Substrate Types,OT,"Other (includes Halimeda, tunicates, seagrass, etc.)"
+Other Substrate Types,RB,Rubble
+Other Substrate Types,SD,Sand
+Other Substrate Types,SI,Silt

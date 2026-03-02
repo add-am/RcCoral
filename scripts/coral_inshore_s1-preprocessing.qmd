@@ -1,0 +1,129 @@
+---
+title: "Untitled"
+format: html
+---
+
+# Introduction
+
+Occasionally RCA have provided us with their raw observational data, rather than proportional coverages. The follow script conducts the analysis required to determine hard and soft coral coverage (what is used for scoring in the Report Card) if they provide the raw data.
+
+# Set Up
+
+Below the script is setup with the required packages and paths.
+
+```{r}
+
+pacman::p_load(dplyr, readxl, glue, here, stringr)
+
+data_path <- glue("{here()}/data")
+output_path <- glue("{here()}/outputs")
+
+```
+
+# Load Data
+
+The following datasets are required:
+
+ 1. The raw observational data, i.e. was seen at each point along the transect (should be 160 points)
+ 2. The obseravtion codes data. At each point observations are recorded via 3 or 4 letter codes. These need to be translated.
+
+```{r}
+
+#load observations
+observations <- read_xlsx(glue("{data_path}/raw/dt_inshore_coral_master.xlsx"), sheet = "RCA_RAW")
+
+#load codes
+codes <- read_csv(glue("{data_path}/raw/rca_substrate_codes.csv"))
+ 
+```
+
+# Clean Data
+
+The key link between the observations and the groups is the codes. Below we ensure that this connection never fails due to a typo.
+
+```{r}
+
+#clean column names with custom function
+observations <- name_cleaning(observations)
+
+#make all codes upper case and remove any spaces
+observations <- observations |> 
+    mutate(across(5:ncol(observations), \(x) str_replace_all(str_to_upper(x), " ", "")))
+
+#make all codes upper case and remove any spaces
+codes <- codes |> 
+     mutate(Code = str_replace_all(str_to_upper(Code), " ", ""))
+
+```
+
+# Analyse Data
+
+Next we need to take the observations and use the codes to put them into one of 7 groups.
+
+```{r}
+
+#pivot the observations data longer
+observations_long <- observations |> 
+    mutate(across(5:ncol(observations), \(x) as.character(x))) |> 
+    pivot_longer(5:ncol(observations), names_to = "Point", values_to = "Code")
+
+#determine what group each code belongs in by joining the two datasets
+observations_long <- observations_long |> 
+    left_join(codes)
+
+#remove macroalgae rows as they are strictly necessary for our calculation
+observations_long <- observations_long |> 
+    filter(!str_detect(Point, "Macroalgae"))
+
+#calculate the amount of hard and soft coral coverage as the proption or rows that belong in that group compared to the total rows
+group_coverage <- observations_long |>
+    group_by(Date, Reef, Site, ResearchSite) |> 
+    mutate(TotalPoints = n()) |> 
+    group_by(Date, Reef, Site, ResearchSite, CategoryGroup) |> 
+    mutate(GroupPoints = n()) |> 
+    ungroup() |> 
+    rowwise() |> 
+    mutate(ProportionalCoverage = (GroupPoints/TotalPoints)*100) |> 
+    select(-c(Code, Point, Description)) |> 
+    unique()
+
+```
+
+# Clean and Present
+
+All calculations have now been completed, below we organise the data for saving and presentation.
+
+```{r}
+
+#clean and filter the data to keep just what we need
+final_tbl <- group_coverage |> 
+    select(-c(TotalPoints, GroupPoints)) |> 
+    filter(
+        CategoryGroup %in% c("Hard Coral", "Soft Coral", "Algae"),
+        Reef == "Magnetic Island Reefs") |> 
+    pivot_wider(names_from = CategoryGroup, values_from = ProportionalCoverage)
+
+#update names and order for cleaner transfer
+final_tbl <- final_tbl |> 
+    rename(
+        ReefName = Reef,
+        SiteName = Site,
+        SiteNumber = ResearchSite,
+        HardCoralCoverage = "Hard Coral",
+        SoftCoralCoverage = "Soft Coral") |> 
+    mutate(
+        CoralBleachingPopulation = NA, 
+        CoralBleachingColony = NA,
+        LiveCoralCoverage = HardCoralCoverage + SoftCoralCoverage) |> 
+    select(
+        ReefName, SiteName, SiteNumber, Date, HardCoralCoverage, SoftCoralCoverage, 
+        LiveCoralCoverage, CoralBleachingPopulation, CoralBleachingColony)
+
+#and clean up the date styling
+final_tbl <- final_tbl |> 
+    mutate(Date = as_date(Date))
+
+#save
+write_csv(final_tbl, glue("{data_path}/processed/rca_scored.csv"))
+
+```
