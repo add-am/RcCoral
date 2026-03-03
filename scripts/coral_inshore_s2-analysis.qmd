@@ -33,7 +33,7 @@ This script requires multiple core spatial packages, each of which is loaded bel
 pacman::p_load(tidyverse, glue, here, sf, tmap, readxl, busdater)
 
 #update/load custom package
-#pak::pak("add-am/RcTools")
+pak::pak("add-am/RcTools")
 library(RcTools)
 
 #define the year of data to be targeted
@@ -62,18 +62,20 @@ rca_site_weightings <- data.frame(NSites = 1:4) |>
 
 Now we need to load in the data, if data is missing refer to the README for more information. Note, for MMP data, the financial year of the survey has already been provided. However, for the RCA data, the actual date of the survey has been provided so we need to determine the financial year ourselves before we can select the target fy.
 
+Also, sometimes RCA does surveys at annoying times that don't quite line up with financial years
+
 ```{r}
 #| label: load in coral data
 
 #read in RCA data and select the target year using the busdater function
-rca_all_data <- read_excel(glue("{data_path}/dt_inshore_coral_master.xlsx"),
-                           sheet = "RCA", na = c("", "NA", "NULL", "null")) |> 
+rca_all_data <- read_excel(glue("{data_path}/raw/dt_inshore_coral_master.xlsx"),
+                           sheet = "RCA_COVER", na = c("", "NA", "NULL", "null")) |> 
   name_cleaning() |> 
   mutate(Fy = get_fy(Date)) |> 
   filter(Fy == current_fyear)
   
 #read in MMP data select the targeted financial year directly
-mmp_all_data <- read_excel(glue("{data_path}/dt_inshore_coral_master.xlsx"),
+mmp_all_data <- read_excel(glue("{data_path}/raw/dt_inshore_coral_master.xlsx"),
                            sheet = "MMP", na = c("", "NA", "NULL", "null")) |>
   name_cleaning() |> 
   filter(Year == current_fyear)
@@ -208,12 +210,12 @@ As we stated above, the scores for RCA now need to have their weightings assigne
 ```{r}
 #| label: weight scores
 
-#add a column for the weights
+#join a column for the weights
 rca_coral_cover <- rca_coral_cover |> 
   left_join(rca_site_weightings) |> 
   select(-NSites)
 
-#add a column for the weights
+#create a column for the weights
 mmp_all_data <- mmp_all_data |> mutate(ProgramWeight = 1)
 
 ```
@@ -340,24 +342,14 @@ all_weighted_data <- all_weighted_data |>
 
 # Scores to Grades
 
-Then we can create a function that will provide grades for the indicators and index as well
+Grades can then be calculated from the scores using a custom function.
 
 ```{r}
 #| label: Scores to grades
 
-#create score to grade function
-score_to_grade <- function(Score) {
-  
-  Grade <- ifelse(Score >= 81, "A",
-                  ifelse(Score >= 61, "B",
-                         ifelse(Score >= 41, "C",
-                                ifelse(Score >= 21, "D", "E"))))
-}
-
-#apply score to grade function to each column
+#calculate grades
 coral_scores_grades <- all_weighted_data |> 
-  mutate(across(4:length(all_weighted_data), 
-                .names = "{str_replace(.col, '_Score', '')}_Grade", ~ score_to_grade(.)))
+  score_to_grade(4:ncol(all_weighted_data))
 
 ```
 
@@ -372,10 +364,11 @@ Everything is done, we can now save our results.
 coral_scores_grades <- coral_scores_grades |> 
   mutate(across(c(Zone, Reef), factor),
          Zone = fct_relevel(Zone, "Cleveland Bay", "Halifax Bay"),
-         Reef = fct_relevel(Reef, "Geoffrey Bay", "Alma Bay", "Florence Bay", "Middle Reef", "Nelly Bay", 
-                            "Cleveland Bay", "Palms East",  "Palms West", "Pandora", "Fantome Island (Juno Bay)", 
-                            "Havannah", "Pandora North", "Havannah North", "Orpheus Island (Pioneer Bay)", 
-                            "Halifax Bay")) |> 
+         Reef = fct_relevel(
+          Reef, 
+          "Geoffrey Bay", "Alma Bay", "Florence Bay", "Middle Reef", "Nelly Bay", "Cleveland Bay", 
+          "Palms East",  "Palms West", "Pandora", "Fantome Island (Juno Bay)", "Havannah", "Pandora North", 
+          "Havannah North", "Orpheus Island (Pioneer Bay)", "Halifax Bay")) |> 
   arrange(Zone, Reef)
 
 #save the whole dataset
@@ -385,11 +378,18 @@ write_csv(coral_scores_grades, glue("{output_path}/all_coral_scores_grades.csv")
 inshore_coral_table <- coral_scores_grades |> 
   select(Zone, Reef, CompositionScore, CoralCoverScore, CoverChangeScore, JuvScore, MaScore, IndexScore)
 
-#load in custom colouring function
-source(here("functions/cond_form_rc_grades.R"))
+#svae data with styling
+save_n3_table(
+  inshore_coral_table,
+  glue("{output_path}/tech_report_coral_scores_and_grades"),
+  3:8,
+  scheme = "Report Card"
+)
 
-#save data
-cond_form_rc_grades(inshore_coral_table, glue("{output_path}/inshore_coral"), cols = c(3:8), method = "Numeric")
+```
+
+```{r}
+
 
 ```
 

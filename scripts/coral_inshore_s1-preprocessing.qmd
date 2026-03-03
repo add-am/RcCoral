@@ -124,6 +124,10 @@ final_tbl <- final_tbl |>
     mutate(Date = as_date(Date))
 
 #save
-write_csv(final_tbl, glue("{data_path}/processed/rca_scored.csv"))
+write_csv(final_tbl, glue("{data_path}/processed/rca_proportions.csv"))
+
+```
+
+```{r}
 
 ```
