@@ -1,0 +1,593 @@
+---
+title: "Inshore Coral Script 1 - Data Analysis"
+subtitle: "A Healthy Waters Partnership Analysis"
+description: "This script has been written to analyse, score, and present inshore marine coral data in the Dry Tropics region."
+author: "Adam Shand"
+format: html
+---
+
+# Introduction
+
+This is a  script written to integrate the RCA coral data with the MMP coral data. A important aspect to note is that the RCA data can not be directly averaged with the MMP data, it must first be weighted. (This is to compensate for differences in the quality of the RCA survey in comparison to the MMP (AIMS) survey).
+
+The weighting to apply to the RCA data is calculated as the function of the square root of the number of the points sampled, relative to the square root of the number of the points sampled by the MMP program (which is 3200 per site).[^1] The number of points per site for RCA is 160.
+
+So as an example:
+
+One RCA site would have a weight of (1/sqrt(3200)/(1/(sqrt(1x160)))) = `r (1/sqrt(3200)/(1/(sqrt(1*160))))`
+Two RCA sites would have a weight of (1/sqrt(3200)/(1/(sqrt(2x160)))) = `r (1/sqrt(3200)/(1/(sqrt(2*160))))`
+Three RCA sites would have a weight of (1/sqrt(3200)/(1/(sqrt(3x160)))) = `r (1/sqrt(3200)/(1/(sqrt(3*160))))`
+
+It should also be clearly stated that therefore MMP scores will be assigned a weighting of 1. I.e. the calculation would be as follows: (1/sqrt(3200)/(1/sqrt(3200))) = `r (1/sqrt(3200)/(1/sqrt(3200)))`
+
+[^1]: Technically the LTMP program only samples 3000 points, however for simplicity and to be consistent with MMP reporting the LTMP sites will be assumed to be 3200 as well.
+
+# Script Set Up
+
+This script requires multiple core spatial packages, each of which is loaded below. Key variables and paths are also created.
+
+```{r}
+#| label: load packages
+
+#use pacman function to load and install (if required) all other packages
+pacman::p_load(dplyr, glue, here, sf, tmap, readxl, busdater)
+
+#update/load custom package
+#pak::pak("add-am/RcTools")
+library(RcTools)
+
+#define the year of data to be and the crs targeted
+current_fyear <- 2025
+proj_crs <- "EPSG:7855"
+
+#define data paths and output paths
+data_path <- glue("{here()}/data")
+output_path <- glue("{here()}/outputs")
+
+```
+
+# Load Data
+
+There are a few different datasets that need to be loaded:
+
+ - An RCA Weightings table
+ - The RCA, MMP, and LTMP coral surveys
+ - Reef outlines for maps, and
+ - Northern Three boundaries for maps
+
+Below each of these datasets are loaded and/or made:
+
+## RCA Weights Table
+
+The RCA weights table can be created manually as it is very easy to code it in.
+
+```{r}
+#| label: set up RCA Weights table
+
+#create RCA weighting table
+rca_site_weightings <- data.frame(NSites = 1:4) |> 
+  mutate(ProgramWeight = (1/sqrt(3200)/(1/(sqrt(NSites*160)))))
+
+```
+
+## Coral Surveys
+
+Next coral surveys are loaded in from the master spreadsheet. Note that sometimes RCA does surveys at annoying times that don't quite line up with financial years.
+
+```{r}
+#| label: load in coral data
+
+#read in RCA data and select the target year using the busdater function
+rca_all_data <- read_excel(glue("{data_path}/raw/dt_inshore_coral_master.xlsx"),
+                           sheet = "RCA_COVER", na = c("", "NA", "NULL", "null")) |> 
+  name_cleaning() |> 
+  mutate(Fy = get_fy(Date)) |> 
+  filter(Fy == current_fyear)
+  
+#read in MMP data select the targeted financial year directly
+mmp_all_data <- read_excel(glue("{data_path}/raw/dt_inshore_coral_master.xlsx"),
+                           sheet = "MMP", na = c("", "NA", "NULL", "null")) |>
+  name_cleaning() |> 
+  filter(Year == current_fyear)
+
+```
+
+## Reef outlines
+
+Reef outlines are loaded in from the GISAIMSR package
+
+```{r}
+#| label: load in coral data
+
+#read in reef data from the aims gis package and update crs
+reefs <- get(data("gbr_feat", package = "gisaimsr")) |> 
+  name_cleaning() |>
+  filter(FeatName == "Reef") |> 
+  st_transform(proj_crs)
+
+#load in custom reef outlines to supplement the main data
+custom_reefs <- st_read(glue("{data_path}/custom_reefs.gpkg")) |> 
+  name_cleaning() |> 
+  st_transform(proj_crs)
+
+```
+
+## Northern Three Region
+
+And finally the n3 region is built or loaded in. Note that we will also clean and filter the data here for the maps that are used later.
+
+```{r}
+
+#create a path to where the data should be
+n3_reg_path <- glue("{data_path}/n3_region.gpkg")
+
+#either load it in, or create it and save it
+if (file.exists(n3_reg_path)){
+
+  n3_region <- st_read(n3_reg_path)
+
+} else {
+
+  n3_region <- build_n3_region()
+  st_write(n3_region, n3_reg_path)
+
+}
+
+#get the marine zones for the dry tropics region
+dt_marine <- n3_region |> 
+  filter(Region == "Dry Tropics", Environment == "Marine", BasinOrZone != "Offshore") |> 
+  mutate(
+    WatercourseOrGeographicArea = case_when(
+      WatercourseOrGeographicArea == "Open Coastal" ~ "H.Open Coastal",
+      WatercourseOrGeographicArea == "Enclosed Coastal" ~ "H.Enclosed Coastal",
+      TRUE ~ WatercourseOrGeographicArea))
+
+#get the land zones for the dry tropics region
+dt_land <- dry_tropics |> 
+  filter(Region == "Dry Tropics", Environment != "Marine") |> 
+  group_by(BasinOrZone) |> 
+  summarise(geom = st_union(geom)) |> 
+  ungroup()
+
+```
+
+# Edit Data
+
+After reading in data we need to perform some basic data cleaning. Each step is explained below.
+
+## Renaming and Adding Context
+
+The data provided by RCA and MMP is not identical, below we rename some variables and columns so that the two datasets match up.
+
+```{r}
+#| label: edit data
+
+#convert some reef names, change a col name, assign the correct zone, and add a program variable
+rca_all_data <- rca_all_data |> 
+    mutate(Date = ymd(Date),
+           Reef = case_when(str_detect(SiteName, "Cattle") ~ "Palms West",
+                            str_detect(SiteName, "Pelorus") ~ "Palms West",
+                            T ~ SiteName),
+           Zone = case_when(str_detect(ReefName, "Magnetic") ~ "Cleveland Bay",
+                            str_detect(ReefName, "Palm") ~ "Halifax Bay",
+                            T ~ "Offshore"),
+           Program = "RCA")
+
+#convert some reef names, assign the correct zone, and add a program variable
+mmp_all_data <- mmp_all_data |>
+  mutate(Reef = case_when(str_detect(Reef, "Magnetic") ~ "Geoffrey Bay",
+                          T ~ Reef),
+         Zone = case_when(Reef == "Geoffrey Bay" ~ "Cleveland Bay",
+                          T ~ "Halifax Bay"),
+         Program = case_when(Reef %in% c("Havannah North", "Pandora North") ~ "LTMP",
+                             T ~ "MMP")) 
+
+```
+
+## Selecting Most Recent Survey
+
+For some RCA reefs more than one survey has been conducted since the previous report. To avoid issues such as changing coral cover between visits, only the most recent survey is used.
+
+```{r}
+#| label: get the correct year of data
+
+#group by reef and site number, and filter for only the most recent survey
+rca_all_data <- rca_all_data |> 
+  group_by(Reef, SiteNumber) |> 
+  filter(Date == max(Date)) |> 
+  ungroup()
+
+```
+
+## Selecting Relevant Reefs
+
+Both the RCA and MMP datasets containing data from reefs that we don't currently monitored, or are not reported upon in this section of the analysis. Below we remove the reefs that are not relevant (Offshore Reefs and the Lady Elliot Reef).
+
+```{r}
+#| label: select relevant reefs
+
+#select relevant data
+rca_all_data <- rca_all_data |> filter(Zone != "Offshore")
+mmp_all_data <- mmp_all_data |> filter(Reef != "Lady Elliot")
+
+```
+
+## Selecting Relevant Indicators
+
+The RCA program monitors five indicators related to coral health:
+
+ - Hard Coral Cover
+ - Soft Coral Cover
+ - *Live Coral Cover*
+ - Coral Bleaching (per population)
+ - Coral Bleaching (per colony)
+
+The MMP program also monitors five indicators related to coral health, although slightly different indicators:
+
+ - Composition
+ - *Coral Cover*
+ - Cover Change
+ - Juvenile Density
+ - Macroalgae
+ - Plus an Index Score
+ 
+The only comparable variable between the two programs is the coral cover variable (Live Coral Cover for RCA). Therefore all other RCA variables can be discarded (But we can keep all five MMP indicators). From the MMP data we will need to remove the Index Score column, as this will need to be recalculated anyway to include the RCA data.
+
+The other different between the RCA data and the MMP data is that RCA coral cover data is measured from 0 to 100 (i.e. 0% cover to 100% cover), whereas MMP coral cover data is measured from 0 to 1 *and most importantly when cover is 75% or greater it is scored as 1.* (i.e. 0% cover to 75% cover). What this means is that for RCA Live Coral Cover to be comparable to MMP Coral Cover we need also to divide the RCA data by 75. (This brings the data into the range of 0-1 and scales to the 0% to 75% scale).
+
+```{r}
+#| label: select relevant indicators
+
+#discard variables using a reverse selection, and divide coral cover data by 75
+rca_coral_cover <- rca_all_data |> 
+  select(-c(HardCoralCoverage, SoftCoralCoverage, CoralBleachingPopulation, CoralBleachingColony)) |> 
+  mutate(CoralCover = LiveCoralCoverage/75)
+
+#remove index score from MMP data as this will be recalculated to include RCA results
+mmp_all_data <- mmp_all_data |> select(-IndexScore)
+
+```
+
+## Obtaining One Indicator Score Per Reef
+
+Some RCA reefs are surveyed multiple times per visit. When this is the case, the results for all surveys at the same reef need to be averaged. We will also need to keep track of exactly how many times the reef was surveyed during the most recent visit.
+
+Equally, MMP reefs are surveyed twice each visit (one survey is completed at 2m, and one at 5m). The results for these surveys also need to be averaged.
+
+```{r}
+#| label: average sites
+
+#group up and get the mean coral cover, as well as a count of how many surveys were conducted (used to assign weightings)
+rca_coral_cover <- rca_coral_cover |> 
+  group_by(Zone, Reef, Program) |> 
+  summarise(CoralCoverScore = mean(CoralCover),
+            NSites = n()) |> 
+  ungroup()
+
+#group up and summarise, note we care about all variables, and not about how many surveys were conducted. Thus the slightly different method. 
+mmp_all_data <- mmp_all_data |> 
+  group_by(Zone, Reef, Program) |> 
+  summarise(across(contains("score"), ~mean(.))) |> 
+  ungroup()
+
+```
+
+## Assigning Weightings
+
+As we stated above, the scores for RCA now need to have their weightings assigned (the actual calculation will come later), for MMP data everything is assigned a weighting of 1, for RCA data the weighting is assigned based on how many surveys were conducted at the reef during the most recent visit.
+
+```{r}
+#| label: weight scores
+
+#join a column for the weights
+rca_coral_cover <- rca_coral_cover |> 
+  left_join(rca_site_weightings) |> 
+  select(-NSites)
+
+#create a column for the weights
+mmp_all_data <- mmp_all_data |> mutate(ProgramWeight = 1)
+
+```
+
+## Binding Data
+
+Now that each of the datasets have been properly edited, they can be combined together. We will create one table that contains only the coral cover data from both the RCA and MMP programs, and we will keep a second table to the side that contains the rest of the MMP data (the other indicators).
+
+We will also take this opportunity to remove the datasets that will no longer be in use, to keep our working environment clean.
+
+```{r}
+#| label: bind datasets
+
+#join all data together
+all_coral_data <- bind_rows(mmp_all_data, rca_coral_cover)
+
+#clean up
+rm(mmp_all_data, rca_all_data, rca_coral_cover, rca_site_weightings)
+
+```
+
+# Calculate Results
+
+We can now start calculating results. For every indicator other than coral cover this is very easy because there is only one data source (the MMP), so all that needs to be done is multiply the data by 100 to convert it to the standard report card format. However, for the coral cover indicator variable it requires a bit of work to ensure the weighting are correct when we combine the RCA and MMP data.
+
+## Coral Cover Scores Per Reef
+
+To calculate the coral cover scores for each reef we need to:
+
+ - figure out the total reef weighting, 
+ - divide each programs' scores' weighting by the total reef weighting
+ - multiply each programs' score by the product of this.
+ - sum the weighted scores for each program together to calculate a total reef score.
+ 
+As an example:
+
+ - Geoffrey Bay was monitored once by MMP (weighting = 1) and twice by RCA (weighting = 0.3162...),
+ - Thus the total weighting for Geoffrey Bay is 1 + 0.3162 = 1.3162
+ - The unweighted RCA coral cover score is 0.729..., and the unweighted MMP coral cover score is 0.388...
+ - Thus the weighted RCA coral cover scores is 0.729 x (0.3162/1.3162) = 0.175...
+ - The weighted MMP coral cover score is 0.389 x (1/1.3162) = 0.294...
+ - And the total reef score for Geoffrey Bay is 0.175 + 0.294 = 0.469
+ - (excuse the rounding errors)
+
+Notes:
+ - For the reefs in which coral cover was only monitored by one program, the weighting process will have no effect.
+ - For all other indicators the code below should no affect the scores - make sure to double check this
+
+```{r}
+#| label: calculate coral cover scores per reef
+
+#calculate reef coral cover weighted scores
+reef_weighted <- all_coral_data |> 
+  group_by(Zone, Reef) |> 
+  mutate(ReefWeight = sum(ProgramWeight), #get the total weight for the reef
+         CoralCoverScore = CoralCoverScore*(ProgramWeight/ReefWeight), #weight scores relative to the whole reef
+         CoralCoverScore = sum(CoralCoverScore), #sum together the scores for each program
+         Program = paste(Program, collapse = " ")) |> #for reefs with multiple programs "sum" their names together to keep track
+  filter(!(Program == "MMP RCA" & is.na(MaScore))) |> #for multi programs, only keep row that contains scores for other indicators as well 
+  select(-c(ProgramWeight, ReefWeight)) |> #drop variables that we no longer need
+  ungroup()
+
+```
+
+## Coral Cover Scores Per Zone
+
+Then we will calculate the coral cover scores for each zone (Cleveland Bay and Halifax Bay). The method to do this is very similar:
+
+ - figure out the total zone weighting (by summing all weightings in the zone),
+ - divide each programs scores' weighting by the total zone weighting
+ - multiply each programs' score by the product of this
+ - sum the weighted scores for each reef together to calculate a total zone score.
+ 
+Notes:
+ - For all other indicators the code below should simply take the mean per zone - make sure to double check this
+
+```{r}
+#| label: calculate coral cover scores per zone
+
+#calculate zone coral cover weighted scores
+zone_weighted <- all_coral_data |> 
+  group_by(Zone) |> 
+  mutate(Reef = Zone, #overwrite reef variable to be the same as the zone variable
+         ZoneWeight = sum(ProgramWeight), #get the total weight for the zone
+         CoralCoverScore = CoralCoverScore*(ProgramWeight/ZoneWeight), #weight scores relative to the whole zone
+         CoralCoverScore = sum(CoralCoverScore), #sum together the coral cover scores for each program
+         Program = paste(unique(Program), collapse = " "), #for zones with multiple programs "sum" their names together to keep track
+         across(contains("Score"), ~mean(., na.rm = T))) |>  #take the mean of all scores per indicator per zone
+  select(-c(ProgramWeight, ZoneWeight)) |> #drop variables that we no longer need
+  unique() |> 
+  ungroup()
+
+```
+
+## Combine Datasets
+
+Now all of the weighting and merging has been completed we can join the two datasets together to create one final dataset. At this point we will also bring the data inline with the traditional report card scoring range by multiplying everything by 100.
+
+```{r}
+#| label: combine datasets
+
+#combined data
+all_weighted_data <- bind_rows(reef_weighted, zone_weighted) |> 
+  mutate(across(where(is.numeric), ~.*100))
+
+#clean up
+rm(reef_weighted, zone_weighted)
+
+```
+
+# Index Scores Per Reef and Zone
+
+The scores for each indicator can now be averaged to calculate the coral index score at both a reef level and a zone level. Once all scores have been calculated we can also round all numbers
+
+```{r}
+#| label: calculate coral index scores
+
+#calculate coral index scores by taking the average of the indicators per row
+all_weighted_data <- all_weighted_data |> 
+  mutate(IndexScore = rowMeans(all_weighted_data[, 4:8]),
+         across(where(is.numeric), round))
+  
+```
+
+# Scores to Grades
+
+Grades can then be calculated from the scores using a custom function.
+
+```{r}
+#| label: Scores to grades
+
+#calculate grades
+coral_scores_grades <- all_weighted_data |> 
+  score_to_grade(4:ncol(all_weighted_data))
+
+```
+
+# Save Results
+
+Everything is done, we can now save our results.
+
+```{r}
+#| label: save results
+
+#first we will rearrange the rows based on a custom order that we use in the technical report
+coral_scores_grades <- coral_scores_grades |> 
+  mutate(across(c(Zone, Reef), factor),
+         Zone = fct_relevel(Zone, "Cleveland Bay", "Halifax Bay"),
+         Reef = fct_relevel(
+          Reef, 
+          "Geoffrey Bay", "Alma Bay", "Florence Bay", "Middle Reef", "Nelly Bay", "Cleveland Bay", 
+          "Palms East",  "Palms West", "Pandora", "Fantome Island (Juno Bay)", "Havannah", "Pandora North", 
+          "Havannah North", "Orpheus Island (Pioneer Bay)", "Halifax Bay")) |> 
+  arrange(Zone, Reef)
+
+#save the whole dataset
+write_csv(coral_scores_grades, glue("{output_path}/all_coral_scores_grades.csv"))
+
+#filter dataset to only get what we need
+inshore_coral_table <- coral_scores_grades |> 
+  select(Zone, Reef, CompositionScore, CoralCoverScore, CoverChangeScore, JuvScore, MaScore, IndexScore)
+
+#svae data with styling
+save_n3_table(
+  inshore_coral_table,
+  glue("{output_path}/tech_report_coral_scores_and_grades"),
+  3:8,
+  scheme = "Report Card"
+)
+
+```
+
+# Visualise Data
+
+Now that all results have been calculated we can also create some basic site maps. However before we do this we will just need to clean up the reef outlines dataset. This is because the names in the reef dataset are too excessive and can visually clutter our map.
+
+```{r}
+#| label: clean up data
+
+#crop reefs to only in Dry Tropics region and take only polygons
+temp_reefs <- st_intersection(reefs, st_union(dt_marine)) |> 
+  st_collection_extract("POLYGON")
+
+#create list for reefs (old and new names) and x and y mods, the order is: Old name = c(New name, Xmod, Ymod)
+reef_list <- list(
+  "Alma Bay" = c("Alma Bay", 1.8, 0),
+  "Magnetic Island Reef (No 1)" = c("Nelly Bay", 1.7, 0),
+  "Magnetic Island Reef (No 2)" = c("Geoffrey Bay (2 sites)", 3, -0.5),
+  "Magnetic Island Reef (No 3)" = c("Florence Bay", 2.4, 0),
+  "Middle Reef" = c("Middle Reef", 2.5, 0),
+  "Havannah Reef" = c("Havannah South", -3, 0),
+  "Havannah_N" = c("Havannah North", 3, 0),
+  "Palms West 1" = c("Palms West 1", -2.4, 0),
+  "Pelorus (North Palm or Yanooa) Reef" = c("Palms West 2", -2.4, 0.5),
+  "Orpheus (Goolboddi) Island Reef (No 5)" = c("Palms East", 2.2, 0),
+  "Pandora Reef" = c("Pandora North", 2.4, 0.2),
+  "Pandora Reef South" = c("Pandora South", -2.4, -0.2))
+
+#filter by name to get reefs we want, add missing reefs and missing columns
+dt_reefs <- temp_reefs |> 
+  filter(GbrName %in% names(reef_list)) |> 
+  select(GbrName) |>
+  rbind(custom_reefs) |> 
+  mutate(Reef = NA, Xmod = NA, Ymod = NA)
+
+#loop over the list and add each item
+for (i in 1:length(reef_list)){
+  
+  dt_reefs <- dt_reefs |> 
+    mutate(
+      Reef = case_when(
+        GbrName == names(reef_list)[i] ~ reef_list[[i]][1], 
+        TRUE ~ Reef),
+      Xmod = case_when(
+        GbrName == names(reef_list)[i] ~ as.numeric(reef_list[[i]][2]), 
+        TRUE ~ Xmod),
+      Ymod = case_when(
+        GbrName == names(reef_list)[i] ~ as.numeric(reef_list[[i]][3]), 
+        TRUE ~ Ymod),
+      Zone = case_when(
+        GbrName %in% names(reef_list)[1:5] ~ "Cleveland Bay", 
+        TRUE ~ "Halifax Bay"))
+
+}
+
+```
+
+And then the maps can be created.
+
+```{r}
+#| label: create map
+
+#create target vector to loop lover
+target_vect <- unique(dt_marine$BasinOrZone)
+
+#create a similar vect for land basins to help with filtering
+land_vect <- rev(unique(dt_land$BasinOrZone))
+
+for (i in 1:length(target_vect)){
+  
+  #filter sites
+  filtered_sites <- dt_reefs |> 
+    filter(Zone == target_vect[i])
+  
+  #create an invisible buffered version of the sites to help position the map
+  buff_sites <- st_buffer(filtered_sites, 8000)
+  
+  #define focus area for overall marine zone and rename column
+  focus_marine <- dt_marine |> 
+    filter(BasinOrZone == target_vect[i]) |> 
+    rename("Geographic Area: All" = WatercourseOrGeographicArea)
+  
+  #create the base water layer for the specific basin
+  water_layer <- maps_water_layer(land_vect[i], WaterLines = TRUE, WaterAreas = TRUE, WaterLakes = TRUE, StreamOrder = 1)
+  
+  #create the background layer using the broader dry tropics backdrop
+  inset_objects <- maps_inset_layer(filtered_sites, dt_marine, 1.1)
+
+  #create the main map
+  coral_map <- tm_shape(qld) +
+    tm_polygons(fill = "grey80") +
+    tm_shape(buff_sites, is.main = TRUE) +
+    tm_polygons(fill_alpha = 0, col_alpha = 0) +
+    tm_shape(dt_marine) +
+    tm_borders(col = "black") +
+    tm_shape(dt_land) +
+    tm_polygons(fill = "grey90", col = "black") +
+    tm_shape(focus_marine) +
+    tm_polygons(
+      fill = "Geographic Area: All", 
+      fill_alpha = 0.5,
+      fill.scale = tm_scale_categorical(values = "brewer.pastel1"),
+      col = "black") +
+    water_layer +
+    tm_shape(filtered_sites) +
+    tm_polygons(
+      fill = "Reef", 
+      fill.scale = tm_scale_categorical(values = "brewer.pastel2"),
+      fill.legend = tm_legend(show = FALSE),
+      col = "black") +
+    tm_text(
+      "Reef", 
+      options = opt_tm_text(shadow = TRUE),
+      xmod = "Xmod", 
+      ymod = "Ymod", 
+      size = 0.8) +
+    tm_layout(
+      legend.bg.color = "white", 
+      legend.position = c("left", "bottom"),
+      asp = 1.1)
+  
+  #and save
+  tmap_save(
+    coral_map, 
+    glue("{output_path}/inshore-marine_{tolower(target_vect[i])}-coral.png"), 
+    insets_tm = inset_objects[1], 
+    insets_vp = inset_objects[2])
+
+}
+
+```
+
+```{r}
+
+```
+
